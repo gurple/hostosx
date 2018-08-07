@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Use the native MacOS X/macOS mechanisms to perform forward and reverse DNS lookups
-# gurple@mac.com
 # Version: 2016090131105 - Initial
 # Version: 201808071148 - Updated to perform reverse lookups.
 
