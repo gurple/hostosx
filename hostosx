@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Use the native MacOS X/macOS mechanisms to perform forward and reverse DNS lookups
-# Version: 2016090131105 - Initial
+# Version: 201609013110 - Initial
 # Version: 201808071148 - Updated to perform reverse lookups.
+# Version: 202203040951 - A 'quiet' option when only the return code is needed.
 
 VERBOSE=YES
 QUERY="$1"
