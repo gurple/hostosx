@@ -20,10 +20,11 @@ fi
 
 # Check if the query is an IPv4 address
 if [[ $QUERY =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] ; then
-	OIFS=$IFS
+	OIFS="$IFS"
 	IFS='.'
+	# Set up each field of the IP address as an array entry
 	ip=($QUERY)
-	IFS=$OIFS
+	IFS="$OIFS"
 	if [[ ${ip[0]} -le 255 && ${ip[1]} -le 255 && ${ip[2]} -le 255 && ${ip[3]} -le 255 ]] ; then
 		LOOKUPTYPE=IPv4
 		LOOKUPRESULT="$(dscacheutil -q host -a ip_address "$QUERY")"
@@ -56,3 +57,4 @@ else
 		exit "$STAT"
 	fi
 fi
+exit "$STAT"
