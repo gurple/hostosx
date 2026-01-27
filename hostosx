@@ -78,16 +78,16 @@ EOF
 
 # Validate IPv4 addresses
 is_valid_ipv4() {
-     local IFS=.
-     local -a parts
-     read -r -a parts <<< "$1"
-     [[ ${#parts[@]} -eq 4 ]] || return 1
-     for octet in "${parts[@]}"; do
-       [[ $octet =~ ^[0-9]+$ ]] || return 1
-       (( octet >= 0 && octet <= 255 )) || return 1
-     done
-     return 0
-   }
+	local IFS=.
+	local -a parts
+	read -r -a parts <<< "$1"
+	[[ ${#parts[@]} -eq 4 ]] || return 1
+	for octet in "${parts[@]}"; do
+		[[ $octet =~ ^[0-9]+$ ]] || return 1
+		(( octet >= 0 && octet <= 255 )) || return 1
+	done
+	return 0
+}
 
 # Validate IPv6 addresses using regex
 is_valid_ipv6() {
