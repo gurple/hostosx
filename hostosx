@@ -6,11 +6,12 @@
 # Version: 202303251129 - Slight reorganization and new silly commented code.
 # Version: 202504061238 - Refactored for clarity and correctness.
 # Version: 202601241920 - Add 'man page' like help output.
+# Version: 202601310958 - Bumped to align with silly TAB edit.
 
 set -o pipefail
 
 SCRIPT_NAME="hostosx"
-SCRIPT_VERSION="202601241920"
+SCRIPT_VERSION="202601310958"
 
 # Initial failure status
 STAT=1
