@@ -8,11 +8,13 @@
 # Version: 202601241920 - Add 'man page' like help output.
 # Version: 202601310958 - Bumped to align with silly TAB edit.
 # Version: 202602181706 - Tighter input validation. Not treating dscacheutil errors as success run.
+# Version: 202602181735 - Hardened against PATH hijack, IPv4 parser abuse, and unsafe error reflection.
 
 set -o pipefail
 
 SCRIPT_NAME="hostosx"
-SCRIPT_VERSION="202602181706"
+SCRIPT_VERSION="202602181735"
+DSCACHEUTIL_BIN="/usr/bin/dscacheutil"
 
 # Initial failure status
 STAT=1
@@ -86,15 +88,9 @@ EOF
 
 # Validate IPv4 addresses
 is_valid_ipv4() {
-	local IFS=.
-	local -a parts
-	read -r -a parts <<< "$1"
-	[[ ${#parts[@]} -eq 4 ]] || return 1
-	for octet in "${parts[@]}"; do
-		[[ $octet =~ ^[0-9]+$ ]] || return 1
-		(( octet >= 0 && octet <= 255 )) || return 1
-	done
-	return 0
+	# Strict dotted-decimal IPv4; avoids bash arithmetic edge cases.
+	# Accepts 0-255 in each octet, rejects ambiguous leading-zero forms.
+	[[ "$1" =~ ^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$ ]]
 }
 
 # Validate IPv6 addresses using regex
@@ -129,6 +125,25 @@ is_valid_hostname() {
 		[[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
 	done
 	return 0
+}
+
+# Identify dotted-quad numeric strings that look like IPv4 input.
+looks_like_ipv4() {
+	[[ "$1" =~ ^[0-9]+(\.[0-9]+){3}$ ]]
+}
+
+# Render untrusted user input safely for error messages.
+# Replace control/non-printable chars, and cap output length.
+safe_for_error() {
+	local s="$1"
+	local max_len=200
+	local printable
+	printable="$(printf '%s' "$s" | LC_ALL=C tr -c '[:print:]' '?')"
+	if ((${#printable} > max_len)); then
+		printf '%s...' "${printable:0:max_len}"
+	else
+		printf '%s' "$printable"
+	fi
 }
 
 # Parse options
@@ -188,27 +203,38 @@ if [[ -z "$QUERY" ]]; then
 fi
 
 # Validate query format before invoking dscacheutil
-if ! is_valid_ipv4 "$QUERY" && ! is_valid_ipv6 "$QUERY" && ! is_valid_hostname "$QUERY"; then
-	echo "${SCRIPT_NAME}: invalid lookup string: '$QUERY'" >&2
+if looks_like_ipv4 "$QUERY" && ! is_valid_ipv4 "$QUERY"; then
+	echo "${SCRIPT_NAME}: invalid lookup string: '$(safe_for_error "$QUERY")'" >&2
 	echo "${SCRIPT_NAME}: expected RFC-compliant hostname/FQDN or IPv4/IPv6 address" >&2
+	exit 1
+fi
+if ! is_valid_ipv4 "$QUERY" && ! is_valid_ipv6 "$QUERY" && ! is_valid_hostname "$QUERY"; then
+	echo "${SCRIPT_NAME}: invalid lookup string: '$(safe_for_error "$QUERY")'" >&2
+	echo "${SCRIPT_NAME}: expected RFC-compliant hostname/FQDN or IPv4/IPv6 address" >&2
+	exit 1
+fi
+
+# Use trusted resolver binary path to avoid PATH hijacking.
+if [[ ! -x "$DSCACHEUTIL_BIN" ]]; then
+	echo "${SCRIPT_NAME}: resolver tool not found at '$DSCACHEUTIL_BIN'" >&2
 	exit 1
 fi
 
 # Perform the appropriate lookup
 if is_valid_ipv4 "$QUERY"; then
-	if LOOKUPRESULT="$(dscacheutil -q host -a ip_address "$QUERY")"; then
+	if LOOKUPRESULT="$("$DSCACHEUTIL_BIN" -q host -a ip_address "$QUERY")"; then
 		:
 	else
 		LOOKUPRESULT=""
 	fi
 elif is_valid_ipv6 "$QUERY"; then
-	if LOOKUPRESULT="$(dscacheutil -q host -a ip_address "$QUERY")"; then
+	if LOOKUPRESULT="$("$DSCACHEUTIL_BIN" -q host -a ip_address "$QUERY")"; then
 		:
 	else
 		LOOKUPRESULT=""
 	fi
 else
-	if LOOKUPRESULT="$(dscacheutil -q host -a name "$QUERY")"; then
+	if LOOKUPRESULT="$("$DSCACHEUTIL_BIN" -q host -a name "$QUERY")"; then
 		:
 	else
 		LOOKUPRESULT=""
