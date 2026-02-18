@@ -7,16 +7,23 @@
 # Version: 202504061238 - Refactored for clarity and correctness.
 # Version: 202601241920 - Add 'man page' like help output.
 # Version: 202601310958 - Bumped to align with silly TAB edit.
+# Version: 202602181706 - Tighter input validation. Not treating dscacheutil errors as success run.
 
 set -o pipefail
 
 SCRIPT_NAME="hostosx"
-SCRIPT_VERSION="202601310958"
+SCRIPT_VERSION="202602181706"
 
 # Initial failure status
 STAT=1
 VERBOSE=YES
 QUERY=""
+
+failed() {
+	echo "$0 - Script failed at line $1."
+}
+
+trap 'failed $LINENO' ERR
 
 # Print a short usage line to stderr
 print_usage() {
@@ -96,6 +103,34 @@ is_valid_ipv6() {
 	[[ "$1" =~ $regex ]]
 }
 
+# Validate hostnames/FQDNs (RFC 1035/1123-style ASCII)
+is_valid_hostname() {
+	local host="$1"
+	local host_nodot
+	local label
+
+	# Reject empty, leading dash, or any whitespace/control chars
+	[[ -n "$host" ]] || return 1
+	[[ "$host" == -* ]] && return 1
+	[[ "$host" =~ [[:space:][:cntrl:]] ]] && return 1
+	[[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+
+	# Strip trailing dot for FQDN validation length rules
+	host_nodot="${host%.}"
+
+	# Total length max 253 (without trailing dot)
+	((${#host_nodot} <= 253)) || return 1
+
+	IFS='.' read -r -a parts <<< "$host_nodot"
+	[[ ${#parts[@]} -gt 0 ]] || return 1
+	for label in "${parts[@]}"; do
+		# Each label 1-63, starts/ends alnum, interior can include hyphen
+		((${#label} >= 1 && ${#label} <= 63)) || return 1
+		[[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
+	done
+	return 0
+}
+
 # Parse options
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -152,13 +187,32 @@ if [[ -z "$QUERY" ]]; then
 	exit 1
 fi
 
+# Validate query format before invoking dscacheutil
+if ! is_valid_ipv4 "$QUERY" && ! is_valid_ipv6 "$QUERY" && ! is_valid_hostname "$QUERY"; then
+	echo "${SCRIPT_NAME}: invalid lookup string: '$QUERY'" >&2
+	echo "${SCRIPT_NAME}: expected RFC-compliant hostname/FQDN or IPv4/IPv6 address" >&2
+	exit 1
+fi
+
 # Perform the appropriate lookup
 if is_valid_ipv4 "$QUERY"; then
-	LOOKUPRESULT="$(dscacheutil -q host -a ip_address "$QUERY")"
+	if LOOKUPRESULT="$(dscacheutil -q host -a ip_address "$QUERY")"; then
+		:
+	else
+		LOOKUPRESULT=""
+	fi
 elif is_valid_ipv6 "$QUERY"; then
-	LOOKUPRESULT="$(dscacheutil -q host -a ip_address "$QUERY")"
+	if LOOKUPRESULT="$(dscacheutil -q host -a ip_address "$QUERY")"; then
+		:
+	else
+		LOOKUPRESULT=""
+	fi
 else
-	LOOKUPRESULT="$(dscacheutil -q host -a name "$QUERY")"
+	if LOOKUPRESULT="$(dscacheutil -q host -a name "$QUERY")"; then
+		:
+	else
+		LOOKUPRESULT=""
+	fi
 fi
 
 # Output results and set status
@@ -168,4 +222,3 @@ if [[ -n "$LOOKUPRESULT" ]]; then
 fi
 
 exit "$STAT"
-
