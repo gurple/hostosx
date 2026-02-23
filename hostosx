@@ -9,70 +9,61 @@
 # Version: 202601310958 - Bumped to align with silly TAB edit.
 # Version: 202602181706 - Tighter input validation. Not treating dscacheutil errors as success run.
 # Version: 202602181735 - Hardened against PATH hijack, IPv4 parser abuse, and unsafe error reflection.
+# Version: 202602231600 - Tightened structure and reduced repeated logic.
 
 set -o pipefail
 
 SCRIPT_NAME="hostosx"
-SCRIPT_VERSION="202602181735"
+SCRIPT_VERSION="202602231600"
 DSCACHEUTIL_BIN="/usr/bin/dscacheutil"
 
-# Initial failure status
 STAT=1
 VERBOSE=YES
 QUERY=""
+LOOKUP_ATTR=""
+LOOKUP_VALUE=""
+HOST_ORIG=""
+HOST_CANON=""
+IDNA_TRIED=NO
+IDNA_OK=NO
 
 failed() {
-	echo "$0 - Script failed at line $1."
+	echo "$0 - Script failed at line $1." >&2
 }
-
 trap 'failed $LINENO' ERR
 
-# Print a short usage line to stderr
 print_usage() {
 	echo "Usage: ${SCRIPT_NAME} [OPTIONS] QUERY" >&2
 	echo "Try '${SCRIPT_NAME} --help' for more information." >&2
 }
 
-# Print help in a man-page style
 print_help() {
-	cat <<EOF
+	cat <<EOF_HELP
 NAME
-	${SCRIPT_NAME} — Forward and reverse DNS lookups using macOS-native mechanisms
+	${SCRIPT_NAME} - Forward and reverse DNS lookups using macOS-native mechanisms
 
 SYNOPSIS
 	${SCRIPT_NAME} [OPTIONS] QUERY
 
 DESCRIPTION
-	${SCRIPT_NAME} performs forward (name → address) and reverse (address → name)
-	DNS lookups using macOS-native resolution mechanisms available to
-	typical GUI apps. It avoids reliance on BSD/ISC userland tools to
-	better reflect what a GUI app might get returned. See dscacheutil(1).
-
-FEATURES
-	• Forward lookup of hostnames to IP addresses
-	• Reverse lookup of IPv4 and IPv6 addresses to hostnames
-	• Quiet mode suitable for scripting with status-only exit codes
-	• Uses dscacheutil, which queries the system's resolver configuration
+	${SCRIPT_NAME} performs forward (name -> address) and reverse (address -> name)
+	DNS lookups using macOS-native resolution mechanisms.
 
 OPTIONS
 	-h, --help
 		Show this help message and exit.
 
-	-q	Quiet mode. Suppress output; only the exit status indicates
-		success.
+	-q	Quiet mode. Suppress output; only the exit status indicates success.
 
 USAGE
-	Forward lookup (hostname → address):
+	Forward lookup:
 		${SCRIPT_NAME} example.com
 
-	Reverse lookup (IPv4 → name):
+	Reverse lookup (IPv4):
 		${SCRIPT_NAME} 104.18.26.120
 
-	Reverse lookup (IPv6 → name):
+	Reverse lookup (IPv6):
 		${SCRIPT_NAME} 2606:4700::6812:1b78
-
-	Quiet mode (status only):
-		${SCRIPT_NAME} -q example.com
 
 EXIT STATUS
 	0   A result was obtained and printed (unless -q was used).
@@ -80,60 +71,45 @@ EXIT STATUS
 
 SEE ALSO
 	dscacheutil(1)
-	
-${SCRIPT_NAME}								${SCRIPT_VERSION}
 
-EOF
+${SCRIPT_NAME}							${SCRIPT_VERSION}
+EOF_HELP
 }
 
-# Validate IPv4 addresses
 is_valid_ipv4() {
-	# Strict dotted-decimal IPv4; avoids bash arithmetic edge cases.
-	# Accepts 0-255 in each octet, rejects ambiguous leading-zero forms.
 	[[ "$1" =~ ^(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])){3}$ ]]
 }
 
-# Validate IPv6 addresses using regex
 is_valid_ipv6() {
 	local regex='^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|fe80:(:[0-9a-fA-F]{0,4}){0,4}%[0-9a-zA-Z]{1,}|::(ffff(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))\.){3}(25[0-5]|(2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))\.){3}(25[0-5]|(2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])))$'
 	[[ "$1" =~ $regex ]]
 }
 
-# Validate hostnames/FQDNs (RFC 1035/1123-style ASCII)
 is_valid_hostname() {
 	local host="$1"
 	local host_nodot
 	local label
 
-	# Reject empty, leading dash, or any whitespace/control chars
 	[[ -n "$host" ]] || return 1
 	[[ "$host" == -* ]] && return 1
 	[[ "$host" =~ [[:space:][:cntrl:]] ]] && return 1
 	[[ "$host" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
 
-	# Strip trailing dot for FQDN validation length rules
 	host_nodot="${host%.}"
-
-	# Total length max 253 (without trailing dot)
 	((${#host_nodot} <= 253)) || return 1
 
 	IFS='.' read -r -a parts <<< "$host_nodot"
 	[[ ${#parts[@]} -gt 0 ]] || return 1
 	for label in "${parts[@]}"; do
-		# Each label 1-63, starts/ends alnum, interior can include hyphen
 		((${#label} >= 1 && ${#label} <= 63)) || return 1
 		[[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?$ ]] || return 1
 	done
-	return 0
 }
 
-# Identify dotted-quad numeric strings that look like IPv4 input.
 looks_like_ipv4() {
 	[[ "$1" =~ ^[0-9]+(\.[0-9]+){3}$ ]]
 }
 
-# Render untrusted user input safely for error messages.
-# Replace control/non-printable chars, and cap output length.
 safe_for_error() {
 	local s="$1"
 	local max_len=200
@@ -146,105 +122,170 @@ safe_for_error() {
 	fi
 }
 
-# Parse options
-while [[ $# -gt 0 ]]; do
-	case "$1" in
-		-h|--help)
-			print_help
-			exit 0
-			;;
-		-q)
-			VERBOSE=NO
-			shift
-			;;
-		--)
-			shift
-			break
-			;;
-		-*)
-			echo "${SCRIPT_NAME}: unrecognized option '$1'" >&2
-			print_usage
-			exit 1
-			;;
-		*)
-			# First non-option is the query
-			if [[ -z "$QUERY" ]]; then
-				QUERY="$1"
-			else
-				echo "${SCRIPT_NAME}: too many arguments: '$1'" >&2
+has_non_ascii() {
+	local s="$1"
+	local filtered
+	filtered="$(printf '%s' "$s" | LC_ALL=C tr -dc ' -~')"
+	[[ "$filtered" != "$s" ]]
+}
+
+idna_to_ascii() {
+	local input="$1"
+	local py="/usr/bin/python3"
+	local out
+	[[ -x "$py" ]] || return 127
+	out="$("$py" -c 'import sys; print(sys.argv[1].encode("idna").decode("ascii"))' "$input" 2>/dev/null)" || return 1
+	[[ -n "$out" ]] || return 1
+	printf '%s\n' "$out"
+}
+
+is_safe_unicode_hostname() {
+	local host="$1"
+	local host_nodot
+	local label
+
+	[[ -n "$host" ]] || return 1
+	[[ "$host" == -* ]] && return 1
+	[[ "$host" =~ [[:space:][:cntrl:]:/\\] ]] && return 1
+
+	host_nodot="${host%.}"
+	((${#host_nodot} <= 253)) || return 1
+
+	IFS='.' read -r -a parts <<< "$host_nodot"
+	[[ ${#parts[@]} -gt 0 ]] || return 1
+	for label in "${parts[@]}"; do
+		((${#label} >= 1 && ${#label} <= 63)) || return 1
+	done
+}
+
+die_invalid_lookup() {
+	echo "${SCRIPT_NAME}: invalid lookup string: '$(safe_for_error "$QUERY")'" >&2
+	echo "${SCRIPT_NAME}: expected RFC-compliant hostname/FQDN or IPv4/IPv6 address" >&2
+	exit 1
+}
+
+parse_args() {
+	while [[ $# -gt 0 ]]; do
+		case "$1" in
+			-h|--help)
+				print_help
+				exit 0
+				;;
+			-q)
+				VERBOSE=NO
+				;;
+			--)
+				shift
+				break
+				;;
+			-*)
+				echo "${SCRIPT_NAME}: unrecognized option '$1'" >&2
 				print_usage
 				exit 1
+				;;
+			*)
+				if [[ -n "$QUERY" ]]; then
+					echo "${SCRIPT_NAME}: too many arguments: '$1'" >&2
+					print_usage
+					exit 1
+				fi
+				QUERY="$1"
+				;;
+		esac
+		shift
+	done
+
+	if [[ -z "$QUERY" && $# -gt 0 ]]; then
+		QUERY="$1"
+		shift
+	fi
+	if [[ $# -gt 0 ]]; then
+		echo "${SCRIPT_NAME}: too many arguments: '$*'" >&2
+		print_usage
+		exit 1
+	fi
+	[[ -n "$QUERY" ]] || die_invalid_lookup
+}
+
+build_lookup_target() {
+	if looks_like_ipv4 "$QUERY" && ! is_valid_ipv4 "$QUERY"; then
+		die_invalid_lookup
+	fi
+
+	if is_valid_ipv4 "$QUERY" || is_valid_ipv6 "$QUERY"; then
+		LOOKUP_ATTR="ip_address"
+		LOOKUP_VALUE="$QUERY"
+		return
+	fi
+
+	HOST_ORIG="$QUERY"
+	HOST_CANON="$HOST_ORIG"
+
+	if has_non_ascii "$HOST_ORIG"; then
+		IDNA_TRIED=YES
+		HOST_CANON="$(idna_to_ascii "$HOST_ORIG" 2>/dev/null || true)"
+		if [[ -n "$HOST_CANON" ]]; then
+			IDNA_OK=YES
+		else
+			HOST_CANON="$HOST_ORIG"
+		fi
+	fi
+
+	if has_non_ascii "$HOST_CANON"; then
+		is_safe_unicode_hostname "$HOST_CANON" || die_invalid_lookup
+	else
+		if ! is_valid_hostname "$HOST_CANON"; then
+			if [[ "$IDNA_TRIED" == YES && "$IDNA_OK" == NO ]]; then
+				is_safe_unicode_hostname "$HOST_ORIG" || die_invalid_lookup
+				HOST_CANON="$HOST_ORIG"
+			else
+				die_invalid_lookup
 			fi
-			shift
-			;;
-	esac
-	# Only shift here for options that don't already shifted
-	# Note: -q has already shifted once to consume itself
-	if [[ "$1" != "" && "$1" != "-q" ]]; then
-		:
+		fi
 	fi
-	continue
-done
 
-if [[ -z "$QUERY" && $# -gt 0 ]]; then
-	QUERY="$1"
-	shift
-fi
-if [[ $# -gt 0 ]]; then
-	echo "${SCRIPT_NAME}: too many arguments: '$*'" >&2
-	print_usage
-	exit 1
-fi
+	LOOKUP_ATTR="name"
+	LOOKUP_VALUE="$HOST_CANON"
+}
 
-# Require a query argument
-if [[ -z "$QUERY" ]]; then
-	print_usage
-	exit 1
-fi
+print_no_records() {
+	[[ "$VERBOSE" == YES ]] || return
 
-# Validate query format before invoking dscacheutil
-if looks_like_ipv4 "$QUERY" && ! is_valid_ipv4 "$QUERY"; then
-	echo "${SCRIPT_NAME}: invalid lookup string: '$(safe_for_error "$QUERY")'" >&2
-	echo "${SCRIPT_NAME}: expected RFC-compliant hostname/FQDN or IPv4/IPv6 address" >&2
-	exit 1
-fi
-if ! is_valid_ipv4 "$QUERY" && ! is_valid_ipv6 "$QUERY" && ! is_valid_hostname "$QUERY"; then
-	echo "${SCRIPT_NAME}: invalid lookup string: '$(safe_for_error "$QUERY")'" >&2
-	echo "${SCRIPT_NAME}: expected RFC-compliant hostname/FQDN or IPv4/IPv6 address" >&2
-	exit 1
-fi
+	if [[ "$LOOKUP_ATTR" == "name" ]]; then
+		if [[ "$IDNA_TRIED" == YES && "$IDNA_OK" == YES && "$HOST_ORIG" != "$LOOKUP_VALUE" ]]; then
+			echo "${SCRIPT_NAME}: no records found for '$(safe_for_error "$HOST_ORIG")' (punycode: '$(safe_for_error "$LOOKUP_VALUE")')" >&2
+		else
+			echo "${SCRIPT_NAME}: no records found for '$(safe_for_error "$LOOKUP_VALUE")'" >&2
+		fi
+	else
+		echo "${SCRIPT_NAME}: no records found for address '$(safe_for_error "$LOOKUP_VALUE")'" >&2
+	fi
+}
 
-# Use trusted resolver binary path to avoid PATH hijacking.
-if [[ ! -x "$DSCACHEUTIL_BIN" ]]; then
-	echo "${SCRIPT_NAME}: resolver tool not found at '$DSCACHEUTIL_BIN'" >&2
-	exit 1
-fi
+main() {
+	parse_args "$@"
+	build_lookup_target
 
-# Perform the appropriate lookup
-if is_valid_ipv4 "$QUERY"; then
-	if LOOKUPRESULT="$("$DSCACHEUTIL_BIN" -q host -a ip_address "$QUERY")"; then
+	if [[ ! -x "$DSCACHEUTIL_BIN" ]]; then
+		echo "${SCRIPT_NAME}: resolver tool not found at '$DSCACHEUTIL_BIN'" >&2
+		exit 1
+	fi
+
+	local lookup_result
+	if lookup_result="$("$DSCACHEUTIL_BIN" -q host -a "$LOOKUP_ATTR" "$LOOKUP_VALUE")"; then
 		:
 	else
-		LOOKUPRESULT=""
+		lookup_result=""
 	fi
-elif is_valid_ipv6 "$QUERY"; then
-	if LOOKUPRESULT="$("$DSCACHEUTIL_BIN" -q host -a ip_address "$QUERY")"; then
-		:
-	else
-		LOOKUPRESULT=""
-	fi
-else
-	if LOOKUPRESULT="$("$DSCACHEUTIL_BIN" -q host -a name "$QUERY")"; then
-		:
-	else
-		LOOKUPRESULT=""
-	fi
-fi
 
-# Output results and set status
-if [[ -n "$LOOKUPRESULT" ]]; then
-	[[ "$VERBOSE" == YES ]] && echo "$LOOKUPRESULT"
-	STAT=0
-fi
+	if [[ -n "$lookup_result" ]]; then
+		[[ "$VERBOSE" == YES ]] && echo "$lookup_result"
+		STAT=0
+	else
+		print_no_records
+	fi
 
-exit "$STAT"
+	exit "$STAT"
+}
+
+main "$@"
