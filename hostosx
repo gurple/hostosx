@@ -10,15 +10,18 @@
 # Version: 202602181706 - Tighter input validation. Not treating dscacheutil errors as success run.
 # Version: 202602181735 - Hardened against PATH hijack, IPv4 parser abuse, and unsafe error reflection.
 # Version: 202602231600 - Tightened structure and reduced repeated logic.
+# Version: 202611241100 - Add -t terse "QUERY<TAB>RESULT" output for pipelines.
 
 set -o pipefail
 
 SCRIPT_NAME="hostosx"
-SCRIPT_VERSION="202602231600"
+SCRIPT_VERSION="202611241100"
 DSCACHEUTIL_BIN="/usr/bin/dscacheutil"
+AWK_BIN="/usr/bin/awk"
 
 STAT=1
 VERBOSE=YES
+TERSE=NO
 QUERY=""
 LOOKUP_ATTR=""
 LOOKUP_VALUE=""
@@ -55,6 +58,10 @@ OPTIONS
 
 	-q	Quiet mode. Suppress output; only the exit status indicates success.
 
+	-t	Terse mode. Print one "QUERY<TAB>RESULT" line per unique result:
+		host names for reverse lookups, addresses for forward lookups.
+		Suitable for pipelines and parallel runs.
+
 USAGE
 	Forward lookup:
 		${SCRIPT_NAME} example.com
@@ -64,6 +71,9 @@ USAGE
 
 	Reverse lookup (IPv6):
 		${SCRIPT_NAME} 2606:4700::6812:1b78
+
+	Bulk lookups, one address or name per input line:
+		xargs -n1 -P8 ${SCRIPT_NAME} -t < addresses.txt
 
 EXIT STATUS
 	0   A result was obtained and printed (unless -q was used).
@@ -174,6 +184,9 @@ parse_args() {
 			-q)
 				VERBOSE=NO
 				;;
+			-t)
+				TERSE=YES
+				;;
 			--)
 				shift
 				break
@@ -262,6 +275,27 @@ print_no_records() {
 	fi
 }
 
+# Reduce dscacheutil's multi-block output to unique "QUERY<TAB>RESULT" lines,
+# emitted as a single write so parallel runs do not interleave.
+terse_format() {
+	local want
+	if [[ "$LOOKUP_ATTR" == "name" ]]; then
+		want="^(ip_address|ipv6_address)$"
+	else
+		want="^name$"
+	fi
+	# shellcheck disable=SC2016
+	printf '%s\n' "$1" | "$AWK_BIN" -v q="$QUERY" -v want="$want" '
+		{
+			key = $1
+			sub(/:$/, "", key)
+			if (key ~ want && NF >= 2 && !seen[$2]++)
+				out = out q "\t" $2 "\n"
+		}
+		END { printf "%s", out }
+	'
+}
+
 main() {
 	parse_args "$@"
 	build_lookup_target
@@ -276,6 +310,10 @@ main() {
 		:
 	else
 		lookup_result=""
+	fi
+
+	if [[ -n "$lookup_result" && "$TERSE" == YES ]]; then
+		lookup_result="$(terse_format "$lookup_result")"
 	fi
 
 	if [[ -n "$lookup_result" ]]; then
